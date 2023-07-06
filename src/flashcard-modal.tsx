@@ -1037,4 +1037,10 @@ export class Deck {
         if (modal.plugin.data.settings.showContextInCards)
             modal.contextView.setText(modal.currentCard.context);
     }
+
+}
+
+export function allCards(deck: Deck): Card[] {
+    let cardsInSubDecks: Card[] = deck.subdecks.flatMap(allCards);
+    return deck.newFlashcards.concat(deck.dueFlashcards, cardsInSubDecks)
 }

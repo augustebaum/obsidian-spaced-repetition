@@ -1,6 +1,6 @@
 .sr-flashcard-menu {
-    display: block;
-    width: 100%;
+    max-width: 500px;
+    margin: auto;
     display: flex;
     justify-content: center;
     align-items: center;
@@ -9,7 +9,8 @@
 
 .sr-flashcard-menu-item {
     box-shadow: none !important;
-    margin-right: 1rem;
+    width: 60px;
+    margin: auto;
     cursor: pointer;
 }
 
@@ -38,11 +39,8 @@
 }
 
 .sr-flashcard-response {
-    display: inline-grid;
+    display: flex;
     width: 100%;
-    grid-template-columns: auto auto auto auto;
-    position: absolute;
-    bottom: 0;
 }
 
 .sr-ignorestats-btn {
@@ -143,11 +141,11 @@
         display: none;
     }
 
-    .sr-flashcard-response,
-    #sr-show-answer {
-        width: 93.5% !important;
-        line-height: 60px;
-    }
+    // .sr-flashcard-response,
+    // #sr-show-answer {
+    //     width: 93.5% !important;
+    //     line-height: 60px;
+    // }
 
     #sr-hard-btn,
     #sr-good-btn,
