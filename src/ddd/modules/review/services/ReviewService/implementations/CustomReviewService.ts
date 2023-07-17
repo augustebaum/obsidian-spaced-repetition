@@ -1,39 +1,25 @@
-import { UseCase } from "src/domain/core/UseCase";
+import { IReviewService } from "../IReviewService";
 
-import { Card, CardReviewSettings } from "src/domain/Card";
-import { CardReviewRating } from "src/domain/CardReviewRating";
+import { CardReviewSettings } from "../../../domain/CardReviewSettings";
+import { CardReviewRating } from "../../../domain/CardReviewRating";
 
-interface Request {
-  card: Card;
-  reviewRating: CardReviewRating;
-}
+import { SRSettings } from "src/settings";
 
-type Response = Result<void>;
+export class CustomReviewService implements IReviewService {
+  private pluginSettings: SRSettings;
 
-export class UpdateCardReviewStats implements UseCase<Request, Promise<Response>> {
-  private cardRepo: CardRepo;
-
-  constructor(cardRepo: CardRepo) {
-    this.cardRepo = cardRepo;
+  constructor(pluginSettings: SRSettings) {
+    this.pluginSettings = pluginSettings;
   }
 
-  async execute (request: Request): Promise<Response> {
-    const { card, reviewRating } = request;
-
-    card.reviewSettings = this.newReviewSettings(card.reviewSettings, reviewRating, null);
-
-    try {
-      await this.cardRepo.save(card);
-      return Result.ok();
-    } catch (err) {
-      return Result.err(err);
-    }
+  newReviewSettings (reviewSettings: CardReviewSettings, rating: CardReviewRating): CardReviewSettings {
+    return this.customNewReviewSettings(reviewSettings, rating, this.pluginSettings);
   }
 
-  private newReviewSettings (
+  private customNewReviewSettings (
     reviewSettings: CardReviewSettings,
     rating: CardReviewRating,
-    settings: SRSettings,
+    pluginSettings: SRSettings
   ): CardReviewSettings {
     let interval = reviewSettings.interval;
     let ease = reviewSettings.ease;
@@ -42,7 +28,7 @@ export class UpdateCardReviewStats implements UseCase<Request, Promise<Response>
     switch (rating) {
       case CardReviewRating.Easy: {
         ease += 20;
-        interval = settings.easyBonus * ((interval + delayBeforeReview) * ease) / 100;
+        interval = pluginSettings.easyBonus * ((interval + delayBeforeReview) * ease) / 100;
       }
       case CardReviewRating.Medium: {
         interval = (interval + delayBeforeReview / 2) * ease / 100;
@@ -51,7 +37,7 @@ export class UpdateCardReviewStats implements UseCase<Request, Promise<Response>
         ease = Math.max(130, ease - 20);
         interval = Math.max(
           1,
-          (interval + delayBeforeReview / 4) * settings.lapsesIntervalChange
+          (interval + delayBeforeReview / 4) * pluginSettings.lapsesIntervalChange
         );
       }
     }
@@ -86,7 +72,7 @@ export class UpdateCardReviewStats implements UseCase<Request, Promise<Response>
     //   dueDates[interval]++;
     // }
 
-    interval = Math.min(interval, settings.maximumInterval);
+    interval = Math.min(interval, pluginSettings.maximumInterval);
     interval = Math.round(interval * 10) / 10;
 
     return { interval, ease, delayBeforeReview };

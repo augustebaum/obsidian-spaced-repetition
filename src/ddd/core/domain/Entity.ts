@@ -1,17 +1,17 @@
-import { UniqueEntityID } from './types';
+import { UniqueEntityId } from "./UniqueEntityId";
 
 const isEntity = (v: any): v is Entity<any> => {
   return v instanceof Entity;
 };
 
 export abstract class Entity<T> {
-  protected readonly _id: UniqueEntityID;
+  protected readonly _id: UniqueEntityId;
   protected props: T;
 
   // Take note of this particular nuance here:
   // Why is "id" optional?
-  constructor(props: T, id?: UniqueEntityID) {
-    this._id = id ? id : new UniqueEntityID();
+  constructor(props: T, id?: UniqueEntityId) {
+    this._id = id ? id : new UniqueEntityId();
     this.props = props;
   }
 

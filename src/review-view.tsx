@@ -1,3 +1,4 @@
+import { ItemView, WorkspaceLeaf } from "obsidian";
 import {
     ButtonComponent,
     Modal,
@@ -149,7 +150,10 @@ export class FlashcardEditModal extends Modal {
     }
 }
 
-export class FlashcardModal extends Modal {
+export const SR_VIEW = "spaced-repetition-view";
+
+export class SpacedRepetitionView extends ItemView {
+// export class FlashcardModal extends Modal {
     public plugin: SRPlugin;
     public answerBtn: HTMLElement;
     public flashcardView: HTMLElement;
@@ -168,8 +172,13 @@ export class FlashcardModal extends Modal {
     public mode: FlashcardModalMode;
     public ignoreStats: boolean;
 
-    constructor(app: App, plugin: SRPlugin, ignoreStats = false) {
-        super(app);
+    constructor(leaf: WorkspaceLeaf, plugin: SRPlugin, ignoreStats=false) {
+      super(leaf);
+  
+      // this.plugin = plugin;
+    // }
+    // constructor(app: App, plugin: SRPlugin, ignoreStats = false) {
+    //     super(app);
 
         this.plugin = plugin;
         this.ignoreStats = ignoreStats;
@@ -227,11 +236,16 @@ export class FlashcardModal extends Modal {
         };
     }
 
-    onOpen(): void {
+    getViewType() { return SR_VIEW; }
+    
+    getDisplayText() { return "Card review"; }
+
+
+    async onOpen() {
         this.decksList();
     }
 
-    onClose(): void {
+    async onClose() {
         this.mode = FlashcardModalMode.Closed;
     }
 

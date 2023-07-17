@@ -48,6 +48,8 @@
         "wdio-chromedriver-service": "^8.1.1"
     },
     "dependencies": {
+        "@badrap/result": "^0.2.13",
+        "@types/uuid": "^9.0.2",
         "chart.js": "^4.3.0",
         "pagerank.js": "^1.0.2"
     },

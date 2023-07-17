@@ -1,11 +1,8 @@
-import { Entity } from "./core/Entity";
-import { UniqueEntityId } from "./core/UniqueEntityId";
-
-import { Card } from "./Card";
+import { Entity } from "src/ddd/core/domain/Entity";
+import { UniqueEntityId } from "src/ddd/core/domain/UniqueEntityId";
 
 interface IDeckProps {
   name: string;
-  cards: Card[];
   parent: Deck | null;
   subdecks: Deck[];
 }
@@ -21,18 +18,4 @@ export class Deck extends Entity<IDeckProps> {
     }
     return new Deck(props, id);
   }
-
-  get cards (): Card[] {
-    const cardsInSubDecks: Card[] = this.props.subdecks
-      .flatMap((deck) => deck.cards);
-    return this.props.cards.concat(cardsInSubDecks);
-  }
-
-  get dueCards (): Card[] {
-    return this.cards.filter(Card.isDue);
-  }
-
-  insertCard (card: Card): void {
-    this.props.cards.push(card);
-  }
-}
+};

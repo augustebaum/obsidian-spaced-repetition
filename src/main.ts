@@ -10,22 +10,23 @@ import {
 import * as graph from "pagerank.js";
 
 import { SRSettingTab, SRSettings, DEFAULT_SETTINGS } from "src/settings";
-import { FlashcardModal, Deck } from "src/flashcard-modal";
-import { StatsModal, Stats } from "src/stats-modal";
+import { FlashcardModal } from "src/flashcard-modal";
+// import { StatsModal, Stats } from "src/stats-modal";
 import { ReviewQueueListView, REVIEW_QUEUE_VIEW_TYPE } from "src/sidebar";
-import { Card, CardType, ReviewResponse, schedule } from "src/scheduling";
+import { CardStats, schedule } from "src/scheduling";
 import {
   YAML_FRONT_MATTER_REGEX,
   SCHEDULING_INFO_REGEX,
-  LEGACY_SCHEDULING_EXTRACTOR,
-  MULTI_SCHEDULING_EXTRACTOR,
 } from "src/constants";
-import { escapeRegexString, cyrb53 } from "src/utils";
-import { ReviewDeck, ReviewDeckSelectionModal } from "src/review-deck";
 import { t } from "src/lang/helpers";
-import { parse } from "src/parser";
-import { appIcon } from "src/icons/appicon";
-import { SpacedRepetitionView, SR_VIEW } from "src/sr-view";
+import { getCardSiblings, parse, doSchedulingStuff } from "src/parser";
+import { showAppIcon } from "src/icons/appIcon";
+import { SpacedRepetitionView, SR_VIEW } from "src/card-review-view/sr-view";
+
+import { Deck } from "./ddd/modules/review/domain/Deck";
+import { ObsidianCard } from "./repo/ObsidianCardRepo";
+import { ObsidianCardRepo } from "./repo/ObsidianCardRepo";
+import { CardReviewSettings } from "./ddd/modules/review/domain/CardReviewSettings";
 
 interface PluginData {
   settings: SRSettings;
@@ -44,11 +45,6 @@ const DEFAULT_DATA: PluginData = {
   historyDeck: null,
 };
 
-export interface SchedNote {
-  note: TFile;
-  dueUnix: number;
-}
-
 export interface LinkStat {
   sourcePath: string;
   linkCount: number;
@@ -60,36 +56,26 @@ export default class SRPlugin extends Plugin {
   public data: PluginData;
   public syncLock = false;
 
-  public reviewDecks: { [deckKey: string]: ReviewDeck; } = {};
   public lastSelectedReviewDeck: string;
 
-  public newNotes: TFile[] = [];
-  public scheduledNotes: SchedNote[] = [];
-  public easeByPath: Record<string, number> = {};
-  private incomingLinks: Record<string, LinkStat[]> = {};
-  private pageranks: Record<string, number> = {};
-  private dueNotesCount = 0;
-  public dueDatesNotes: Record<number, number> = {}; // Record<# of days in future, due count>
+  // public newNotes: TFile[] = [];
+  // public scheduledNotes: SchedNote[] = [];
+  // public easeByPath: Record<string, number> = {};
+  // private incomingLinks: Record<string, LinkStat[]> = {};
+  // private pageranks: Record<string, number> = {};
+  // private dueNotesCount = 0;
+  // public dueDatesNotes: Record<number, number> = {}; // Record<# of days in future, due count>
 
-  public deckTree: Deck = new Deck("root", null);
-  public dueDatesFlashcards: Record<number, number> = {}; // Record<# of days in future, due count>
-  public cardStats: Stats;
+  // public deckTree: Deck = new Deck("root", null);
+  // public dueDatesFlashcards: Record<number, number> = {}; // Record<# of days in future, due count>
+  // public cardStats: Stats;
+
+  public cardRepo: ObsidianCardRepo;
 
   async onload (): Promise<void> {
     await this.loadPluginData();
 
-    appIcon();
-
-    this.statusBar = this.addStatusBarItem();
-    this.statusBar.classList.add("mod-clickable");
-    this.statusBar.setAttribute("aria-label", t("OPEN_NOTE_FOR_REVIEW"));
-    this.statusBar.setAttribute("aria-label-position", "top");
-    this.statusBar.addEventListener("click", async () => {
-      if (!this.syncLock) {
-        await this.sync();
-        this.reviewNextNoteModal();
-      }
-    });
+    showAppIcon();
 
     this.registerView(SR_VIEW, (leaf) => new SpacedRepetitionView(leaf, this));
 
@@ -142,17 +128,6 @@ export default class SRPlugin extends Plugin {
         })
       );
     }
-
-    this.addCommand({
-      id: "srs-note-review-open-note",
-      name: t("OPEN_NOTE_FOR_REVIEW"),
-      callback: async () => {
-        if (!this.syncLock) {
-          await this.sync();
-          this.reviewNextNoteModal();
-        }
-      },
-    });
 
     this.addCommand({
       id: "srs-note-review-easy",
@@ -213,9 +188,11 @@ export default class SRPlugin extends Plugin {
       callback: async () => {
         const openFile: TFile | null = this.app.workspace.getActiveFile();
         if (openFile && openFile.extension === "md") {
-          this.deckTree = new Deck("root", null);
+          await this.sync();
+          // this.deckTree = new Deck("root", null);
           const deckPath: string[] = this.findDeckPath(openFile);
-          await this.findFlashcardsInNote(openFile, deckPath);
+          const cards = await this.cardRepo.getByDecks([deckPath]);
+          // ReviewCards(cards)
           new FlashcardModal(this.app, this).open();
         }
       },
@@ -227,6 +204,7 @@ export default class SRPlugin extends Plugin {
       callback: async () => {
         const openFile: TFile | null = this.app.workspace.getActiveFile();
         if (openFile && openFile.extension === "md") {
+
           this.deckTree = new Deck("root", null);
           const deckPath: string[] = this.findDeckPath(openFile);
           await this.findFlashcardsInNote(openFile, deckPath, false, true);
@@ -250,11 +228,7 @@ export default class SRPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(() => {
       this.initView();
-      setTimeout(async () => {
-        if (!this.syncLock) {
-          await this.sync();
-        }
-      }, 2000);
+      setTimeout(async () => { await this.sync(); }, 2000);
     });
   }
 
@@ -269,24 +243,25 @@ export default class SRPlugin extends Plugin {
     this.syncLock = true;
 
     // reset notes stuff
-    graph.reset();
-    this.easeByPath = {};
-    this.incomingLinks = {};
-    this.pageranks = {};
-    this.dueNotesCount = 0;
-    this.dueDatesNotes = {};
-    this.reviewDecks = {};
+    // graph.reset();
+    // this.easeByPath = {};
+    // this.incomingLinks = {};
+    // this.pageranks = {};
+    // this.dueNotesCount = 0;
+    // this.dueDatesNotes = {};
 
     // reset flashcards stuff
-    this.deckTree = new Deck("root", null);
-    this.dueDatesFlashcards = {};
-    this.cardStats = {
-      eases: {},
-      intervals: {},
-      newCount: 0,
-      youngCount: 0,
-      matureCount: 0,
-    };
+    // this.deckTree = new Deck("root", null);
+    // this.dueDatesFlashcards = {};
+    // this.cardStats = {
+    //   eases: {},
+    //   intervals: {},
+    //   newCount: 0,
+    //   youngCount: 0,
+    //   matureCount: 0,
+    // };
+
+    this.cardRepo = new ObsidianCardRepo(this.data.settings);
 
     const now = window.moment(Date.now());
     const todayDate: string = now.format("YYYY-MM-DD");
@@ -297,142 +272,143 @@ export default class SRPlugin extends Plugin {
     }
 
     const notes: TFile[] = this.app.vault.getMarkdownFiles();
-    let d = structuredClone(this.deckTree).newFlashcardsCount;
 
     for (const note of notes) {
-      if (
-        this.data.settings.noteFoldersToIgnore.some((folder) =>
-          note.path.startsWith(folder)
-        )
-      ) { continue; }
+      if (this.data.settings.noteFoldersToIgnore.some(
+        (folder) => note.path.startsWith(folder)
+      )) { continue; }
 
-      if (this.incomingLinks[note.path] === undefined) {
-        this.incomingLinks[note.path] = [];
-      }
-      const links = this.app.metadataCache.resolvedLinks[note.path] || {};
-      for (const targetPath in links) {
-        if (this.incomingLinks[targetPath] === undefined)
-          this.incomingLinks[targetPath] = [];
+      // if (this.incomingLinks[note.path] === undefined) {
+      //   this.incomingLinks[note.path] = [];
+      // }
+      // const links = this.app.metadataCache.resolvedLinks[note.path] || {};
+      // for (const targetPath in links) {
+      //   if (this.incomingLinks[targetPath] === undefined)
+      //     this.incomingLinks[targetPath] = [];
 
-        // markdown files only
-        if (targetPath.split(".").pop().toLowerCase() === "md") {
-          this.incomingLinks[targetPath].push({
-            sourcePath: note.path,
-            linkCount: links[targetPath],
-          });
+      //   // markdown files only
+      //   if (targetPath.split(".").pop().toLowerCase() === "md") {
+      //     this.incomingLinks[targetPath].push({
+      //       sourcePath: note.path,
+      //       linkCount: links[targetPath],
+      //     });
 
-          graph.link(note.path, targetPath, links[targetPath]);
-        }
-      }
+      //     graph.link(note.path, targetPath, links[targetPath]);
+      //   }
+      // }
+
       const deckPath: string[] = this.findDeckPath(note);
       if (deckPath.length !== 0) {
-        // This actually saves the cards into the deckTree
-        const flashcardsInNoteAvgEase: number = await this.findFlashcardsInNote(
+        let cardsInNote = await this.findFlashcardsInNote(
           note,
           deckPath,
           false,
           ignoreStats
         );
-
-        if (flashcardsInNoteAvgEase > 0) {
-          this.easeByPath[note.path] = flashcardsInNoteAvgEase;
+        for (const card of cardsInNote) {
+          this.cardRepo.save(card);
         }
       }
+
+
       // See if card has a "to-review" tag, such as "#review"
-      const fileCachedData = this.app.metadataCache.getFileCache(note) || {};
 
-      const frontmatter: FrontMatterCache | Record<string, unknown> =
-        fileCachedData.frontmatter || {};
-      const tags = getAllTags(fileCachedData) || [];
+      // const fileCachedData = this.app.metadataCache.getFileCache(note) || {};
+      // const tags = getAllTags(fileCachedData) || [];
 
-      let shouldIgnore = true;
-      const matchedNoteTags = [];
+      // let shouldIgnore = true;
+      // // const matchedNoteTags = [];
 
-      for (const tagToReview of this.data.settings.tagsToReview) {
-        if (tags.some((tag) => tag === tagToReview || tag.startsWith(tagToReview + "/"))) {
-          if (!Object.prototype.hasOwnProperty.call(this.reviewDecks, tagToReview)) {
-            this.reviewDecks[tagToReview] = new ReviewDeck(tagToReview);
-          }
-          matchedNoteTags.push(tagToReview);
-          shouldIgnore = false;
-          break;
-        }
-      }
-      if (shouldIgnore) {
-        continue;
-      }
+      // for (const tagToReview of this.data.settings.tagsToReview) {
+      //   if (tags.some((tag) => tag === tagToReview || tag.startsWith(tagToReview + "/"))) {
+      //     // if (!Object.prototype.hasOwnProperty.call(this.reviewDecks, tagToReview)) {
+      //     //   this.reviewDecks[tagToReview] = new ReviewDeck(tagToReview);
+      //     // }
+      //     // matchedNoteTags.push(tagToReview);
+      //     shouldIgnore = false;
+      //     break;
+      //   }
+      // }
+      // if (shouldIgnore) {
+      //   continue;
+      // }
 
-      // file has no scheduling information
-      if (
-        !(
-          Object.prototype.hasOwnProperty.call(frontmatter, "sr-due") &&
-          Object.prototype.hasOwnProperty.call(frontmatter, "sr-interval") &&
-          Object.prototype.hasOwnProperty.call(frontmatter, "sr-ease")
-        )
-      ) {
-        for (const matchedNoteTag of matchedNoteTags) {
-          this.reviewDecks[matchedNoteTag].newNotes.push(note);
-        }
-        continue;
-      }
+      // // file has no scheduling information
+      // const frontmatter: FrontMatterCache | Record<string, unknown> =
+      //   fileCachedData.frontmatter || {};
+      // if (
+      //   !(
+      //     Object.prototype.hasOwnProperty.call(frontmatter, "sr-due") &&
+      //     Object.prototype.hasOwnProperty.call(frontmatter, "sr-interval") &&
+      //     Object.prototype.hasOwnProperty.call(frontmatter, "sr-ease")
+      //   )
+      // ) {
+      //   // for (const matchedNoteTag of matchedNoteTags) {
+      //   //   this.reviewDecks[matchedNoteTag].newNotes.push(note);
+      //   // }
+      //   continue;
+      // }
 
-      const dueUnix: number = window
-        .moment(frontmatter["sr-due"], ["YYYY-MM-DD", "DD-MM-YYYY", "ddd MMM DD YYYY"])
-        .valueOf();
+      // const dueUnix: number = window
+      //   .moment(frontmatter["sr-due"], ["YYYY-MM-DD", "DD-MM-YYYY", "ddd MMM DD YYYY"])
+      //   .valueOf();
 
-      for (const matchedNoteTag of matchedNoteTags) {
-        this.reviewDecks[matchedNoteTag].scheduledNotes.push({ note, dueUnix });
-        if (dueUnix <= now.valueOf()) {
-          this.reviewDecks[matchedNoteTag].dueNotesCount++;
-        }
-      }
+      // for (const matchedNoteTag of matchedNoteTags) {
+      //   this.reviewDecks[matchedNoteTag].scheduledNotes.push({ note, dueUnix });
+      //   if (dueUnix <= now.valueOf()) {
+      //     this.reviewDecks[matchedNoteTag].dueNotesCount++;
+      //   }
+      // }
 
-      if (Object.prototype.hasOwnProperty.call(this.easeByPath, note.path)) {
-        this.easeByPath[note.path] =
-          (this.easeByPath[note.path] + frontmatter["sr-ease"]) / 2;
-      } else {
-        this.easeByPath[note.path] = frontmatter["sr-ease"];
-      }
+      // if (Object.prototype.hasOwnProperty.call(this.easeByPath, note.path)) {
+      //   this.easeByPath[note.path] =
+      //     (this.easeByPath[note.path] + frontmatter["sr-ease"]) / 2;
+      // } else {
+      //   this.easeByPath[note.path] = frontmatter["sr-ease"];
+      // }
 
-      if (dueUnix <= now.valueOf()) {
-        this.dueNotesCount++;
-      }
+      // if (dueUnix <= now.valueOf()) {
+      //   this.dueNotesCount++;
+      // }
 
-      const nDays: number = Math.ceil((dueUnix - now.valueOf()) / (24 * 3600 * 1000));
-      if (!Object.prototype.hasOwnProperty.call(this.dueDatesNotes, nDays)) {
-        this.dueDatesNotes[nDays] = 0;
-      }
-      this.dueDatesNotes[nDays]++;
+      //   const nDays: number = Math.ceil((dueUnix - now.valueOf()) / (24 * 3600 * 1000));
+      //   if (!Object.prototype.hasOwnProperty.call(this.dueDatesNotes, nDays)) {
+      //     this.dueDatesNotes[nDays] = 0;
+      //   }
+      //   this.dueDatesNotes[nDays]++;
     }
 
     graph.rank(0.85, 0.000001, (node: string, rank: number) => {
       this.pageranks[node] = rank * 10000;
     });
     // sort the deck names
-    this.deckTree.sortSubdecksList();
+    // this.deckTree.sortSubdecksList();
     if (this.data.settings.showDebugMessages) {
       console.log(`SR: ${t("EASES")}`, this.easeByPath);
       console.log(`SR: ${t("DECKS")}`, this.deckTree);
     }
 
-    for (const deckKey in this.reviewDecks) {
-      this.reviewDecks[deckKey].sortNotes(this.pageranks);
-    }
+    // for (const deckKey in this.reviewDecks) {
+    //   this.reviewDecks[deckKey].sortNotes(this.pageranks);
+    // }
 
     if (this.data.settings.showDebugMessages) {
       console.log("SR: " + t("SYNC_TIME_TAKEN", { t: Date.now() - now.valueOf(), }));
     }
 
-    this.statusBar.setText(
-      t("STATUS_BAR", {
-        dueNotesCount: this.dueNotesCount,
-        dueFlashcardsCount: this.deckTree.dueFlashcardsCount,
-      })
-    );
+    // this.statusBar.setText(
+    //   t("STATUS_BAR", {
+    //     dueNotesCount: this.dueNotesCount,
+    //     dueFlashcardsCount: this.deckTree.dueFlashcardsCount,
+    //   })
+    // );
 
-    if (this.data.settings.enableNoteReviewPaneOnStartup) this.reviewQueueView.redraw();
+    if (this.data.settings.enableNoteReviewPaneOnStartup) {
+      this.reviewQueueView.redraw();
+    }
     this.syncLock = false;
   }
+
 
   async saveReviewResponse (note: TFile, response: ReviewResponse): Promise<void> {
     const fileCachedData = this.app.metadataCache.getFileCache(note) || {};
@@ -522,11 +498,13 @@ export default class SRPlugin extends Plugin {
           .valueOf();
     }
 
-    const schedObj: Record<string, number> = schedule(
+    const schedObj: CardStats = schedule(
       response,
-      interval,
-      ease,
-      delayBeforeReview,
+      {
+        interval,
+        ease,
+        delayBeforeReview,
+      },
       this.data.settings,
       this.dueDatesNotes
     );
@@ -568,48 +546,6 @@ export default class SRPlugin extends Plugin {
     new Notice(t("RESPONSE_RECEIVED"));
 
     await this.sync();
-    if (this.data.settings.autoNextNote) {
-      this.reviewNextNote(this.lastSelectedReviewDeck);
-    }
-  }
-
-  async reviewNextNoteModal (): Promise<void> {
-    const reviewDeckNames: string[] = Object.keys(this.reviewDecks);
-    if (reviewDeckNames.length === 1) {
-      this.reviewNextNote(reviewDeckNames[0]);
-    } else {
-      const deckSelectionModal = new ReviewDeckSelectionModal(this.app, reviewDeckNames);
-      deckSelectionModal.submitCallback = (deckKey: string) => this.reviewNextNote(deckKey);
-      deckSelectionModal.open();
-    }
-  }
-
-  async reviewNextNote (deckKey: string): Promise<void> {
-    if (!Object.prototype.hasOwnProperty.call(this.reviewDecks, deckKey)) {
-      new Notice(t("NO_DECK_EXISTS", { deckName: deckKey }));
-      return;
-    }
-
-    this.lastSelectedReviewDeck = deckKey;
-    const deck = this.reviewDecks[deckKey];
-
-    if (deck.dueNotesCount > 0) {
-      const index = this.data.settings.openRandomNote
-        ? Math.floor(Math.random() * deck.dueNotesCount)
-        : 0;
-      await this.app.workspace.getLeaf().openFile(deck.scheduledNotes[index].note);
-      return;
-    }
-
-    if (deck.newNotes.length > 0) {
-      const index = this.data.settings.openRandomNote
-        ? Math.floor(Math.random() * deck.newNotes.length)
-        : 0;
-      this.app.workspace.getLeaf().openFile(deck.newNotes[index]);
-      return;
-    }
-
-    new Notice(t("ALL_CAUGHT_UP"));
   }
 
   findDeckPath (note: TFile): string[] {
@@ -641,19 +577,20 @@ export default class SRPlugin extends Plugin {
     note: TFile,
     deckPath: string[],
     buryOnly = false,
-    ignoreStats = false
-  ): Promise<number> {
+    ignoreStats = false,
+  ): Promise<ObsidianCard[]> {
     let fileText: string = await this.app.vault.read(note);
     const fileCachedData = this.app.metadataCache.getFileCache(note) || {};
     const headings: HeadingCache[] = fileCachedData.headings || [];
-    let fileChanged = false,
-      totalNoteEase = 0,
-      scheduledCount = 0;
+    // let totalNoteEase = 0;
+    // let scheduledCount = 0;
     const settings: SRSettings = this.data.settings;
     const noteDeckPath = deckPath;
 
+    let cards: ObsidianCard[] = [];
+
     const now: number = Date.now();
-    const parsedCards: [CardType, string, number][] = parse(
+    const parsedCards = parse(
       fileText,
       settings.singleLineCardSeparator,
       settings.singleLineReversedCardSeparator,
@@ -663,236 +600,120 @@ export default class SRPlugin extends Plugin {
       settings.convertBoldTextToClozes,
       settings.convertCurlyBracketsToClozes
     );
-    for (const parsedCard of parsedCards) {
-      deckPath = noteDeckPath;
-      const cardType: CardType = parsedCard[0],
-        lineNo: number = parsedCard[2];
-      let cardText: string = parsedCard[1];
 
-      if (cardText.includes(settings.editLaterTag)) {
-        continue;
-      }
+    for (const parsedCard of parsedCards) {
+      let { cardType, cardText, lineNumber } = parsedCard;
+
+      deckPath = noteDeckPath;
+
+      // That means the card is not included in reviews... why?
+      // if (cardText.includes(settings.editLaterTag)) {
+      //   continue;
+      // }
 
       if (!settings.convertFoldersToDecks) {
-        const tagInCardRegEx = /^#[^\s#]+/gi;
+        const tagInCardRegExp = /^#[^\s#]+/gi;
         const cardDeckPath = cardText
-          .match(tagInCardRegEx)
+          .match(tagInCardRegExp)
           ?.slice(-1)[0]
           .replace("#", "")
           .split("/");
         if (cardDeckPath) {
           deckPath = cardDeckPath;
-          cardText = cardText.replaceAll(tagInCardRegEx, "");
+          cardText = cardText.replaceAll(tagInCardRegExp, "");
         }
       }
 
-      this.deckTree.createDeck([...deckPath]);
+      const deck = Deck.create({ name: deckPath.join(), parent: null, subdecks: [] });
 
-      const cardTextHash: string = cyrb53(cardText);
 
-      if (buryOnly) {
-        this.data.buryList.push(cardTextHash);
-        continue;
+      // this.deckTree.createDeck([...deckPath]);
+
+      // const cardTextHash: string = cyrb53(cardText);
+
+      // if (buryOnly) {
+      //   this.data.buryList.push(cardTextHash);
+      //   continue;
+      // }
+
+      const siblingMatches = getCardSiblings(cardType, cardText, settings);
+
+      const { scheduling, newFileText } = doSchedulingStuff(fileText, cardText, siblingMatches);
+      if (newFileText != null) {
+        await this.app.vault.modify(note, newFileText);
       }
 
-      const siblingMatches: [string, string][] = [];
-      if (cardType === CardType.Cloze) {
-        const siblings: RegExpMatchArray[] = [];
-        if (settings.convertHighlightsToClozes) {
-          siblings.push(...cardText.matchAll(/==(.*?)==/gm));
-        }
-        if (settings.convertBoldTextToClozes) {
-          siblings.push(...cardText.matchAll(/\*\*(.*?)\*\*/gm));
-        }
-        if (settings.convertCurlyBracketsToClozes) {
-          siblings.push(...cardText.matchAll(/{{(.*?)}}/gm));
-        }
-        siblings.sort((a, b) => {
-          if (a.index < b.index) {
-            return -1;
-          }
-          if (a.index > b.index) {
-            return 1;
-          }
-          return 0;
-        });
-
-        let front: string, back: string;
-        for (const m of siblings) {
-          const deletionStart: number = m.index,
-            deletionEnd: number = deletionStart + m[0].length;
-          front =
-            cardText.substring(0, deletionStart) +
-            "<span style='color:#2196f3'>[...]</span>" +
-            cardText.substring(deletionEnd);
-          front = front
-            .replace(/==/gm, "")
-            .replace(/\*\*/gm, "")
-            .replace(/{{/gm, "")
-            .replace(/}}/gm, "");
-          back =
-            cardText.substring(0, deletionStart) +
-            "<span style='color:#2196f3'>" +
-            cardText.substring(deletionStart, deletionEnd) +
-            "</span>" +
-            cardText.substring(deletionEnd);
-          back = back
-            .replace(/==/gm, "")
-            .replace(/\*\*/gm, "")
-            .replace(/{{/gm, "")
-            .replace(/}}/gm, "");
-          siblingMatches.push([front, back]);
-        }
-      } else {
-        let idx: number;
-        if (cardType === CardType.SingleLineBasic) {
-          idx = cardText.indexOf(settings.singleLineCardSeparator);
-          siblingMatches.push([
-            cardText.substring(0, idx),
-            cardText.substring(idx + settings.singleLineCardSeparator.length),
-          ]);
-        } else if (cardType === CardType.SingleLineReversed) {
-          idx = cardText.indexOf(settings.singleLineReversedCardSeparator);
-          const side1: string = cardText.substring(0, idx),
-            side2: string = cardText.substring(
-              idx + settings.singleLineReversedCardSeparator.length
-            );
-          siblingMatches.push([side1, side2]);
-          siblingMatches.push([side2, side1]);
-        } else if (cardType === CardType.MultiLineBasic) {
-          idx = cardText.indexOf("\n" + settings.multilineCardSeparator + "\n");
-          siblingMatches.push([
-            cardText.substring(0, idx),
-            cardText.substring(idx + 2 + settings.multilineCardSeparator.length),
-          ]);
-        } else if (cardType === CardType.MultiLineReversed) {
-          idx = cardText.indexOf("\n" + settings.multilineReversedCardSeparator + "\n");
-          const side1: string = cardText.substring(0, idx),
-            side2: string = cardText.substring(
-              idx + 2 + settings.multilineReversedCardSeparator.length
-            );
-          siblingMatches.push([side1, side2]);
-          siblingMatches.push([side2, side1]);
-        }
-      }
-
-      let scheduling: RegExpMatchArray[] = [...cardText.matchAll(MULTI_SCHEDULING_EXTRACTOR)];
-      if (scheduling.length === 0)
-        scheduling = [...cardText.matchAll(LEGACY_SCHEDULING_EXTRACTOR)];
-
-      // we have some extra scheduling dates to delete
-      if (scheduling.length > siblingMatches.length) {
-        const idxSched: number = cardText.lastIndexOf("<!--SR:") + 7;
-        let newCardText: string = cardText.substring(0, idxSched);
-        for (let i = 0; i < siblingMatches.length; i++)
-          newCardText += `!${scheduling[i][1]},${scheduling[i][2]},${scheduling[i][3]}`;
-        newCardText += "-->";
-
-        const replacementRegex = new RegExp(escapeRegexString(cardText), "gm");
-        fileText = fileText.replace(replacementRegex, () => newCardText);
-        fileChanged = true;
-      }
-
-      const context: string = settings.showContextInCards
-        ? getCardContext(lineNo, headings, note.basename)
-        : "";
-      const siblings: Card[] = [];
+      // Add all siblings to list of cards
+      // {
+      // Proto-cards
+      let siblings = [];
       for (let i = 0; i < siblingMatches.length; i++) {
-        const front: string = siblingMatches[i][0].trim(),
-          back: string = siblingMatches[i][1].trim();
 
-        const cardObj: Card = {
-          isDue: i < scheduling.length,
-          note,
-          lineNo,
-          front,
-          back,
+        let cardProps = {
+          type: cardType,
+
+          deck: deck,
+
+          front: siblingMatches[i][0].trim(),
+          back: siblingMatches[i][1].trim(),
           cardText,
-          context,
-          cardType,
-          siblingIdx: i,
-          siblings,
-          editLater: false,
+          context: getCardContext(lineNumber, headings, note.basename),
+
+          // isDue: i < scheduling.length,
+          location: { file: note, lineNumber },
+
+          indexInSiblings: i,
+          // Set later
+          siblings: undefined,
+
+          // Set later
+          reviewSettings: undefined,
         };
 
-        // card scheduled
-        if (ignoreStats) {
-          this.cardStats.newCount++;
-          cardObj.isDue = true;
-          this.deckTree.insertFlashcard([...deckPath], cardObj);
-        } else if (i < scheduling.length) {
-          const dueUnix: number = window
-            .moment(scheduling[i][1], ["YYYY-MM-DD", "DD-MM-YYYY"])
-            .valueOf();
-          const nDays: number = Math.ceil((dueUnix - now) / (24 * 3600 * 1000));
-          if (!Object.prototype.hasOwnProperty.call(this.dueDatesFlashcards, nDays)) {
-            this.dueDatesFlashcards[nDays] = 0;
-          }
-          this.dueDatesFlashcards[nDays]++;
+        siblings.push(cardProps);
+      }
 
-          const interval: number = parseInt(scheduling[i][2]),
-            ease: number = parseInt(scheduling[i][3]);
-          if (!Object.prototype.hasOwnProperty.call(this.cardStats.intervals, interval)) {
-            this.cardStats.intervals[interval] = 0;
-          }
-          this.cardStats.intervals[interval]++;
-          if (!Object.prototype.hasOwnProperty.call(this.cardStats.eases, ease)) {
-            this.cardStats.eases[ease] = 0;
-          }
-          this.cardStats.eases[ease]++;
-          totalNoteEase += ease;
-          scheduledCount++;
-
-          if (interval >= 32) {
-            this.cardStats.matureCount++;
-          } else {
-            this.cardStats.youngCount++;
-          }
-
-          if (this.data.buryList.includes(cardTextHash)) {
-            this.deckTree.countFlashcard([...deckPath]);
-            continue;
-          }
-
-          if (dueUnix <= now) {
-            cardObj.interval = interval;
-            cardObj.ease = ease;
-            cardObj.delayBeforeReview = now - dueUnix;
-            this.deckTree.insertFlashcard([...deckPath], cardObj);
-          } else {
-            this.deckTree.countFlashcard([...deckPath]);
-            continue;
-          }
-        } else {
-          this.cardStats.newCount++;
-          if (this.data.buryList.includes(cyrb53(cardText))) {
-            this.deckTree.countFlashcard([...deckPath]);
-            continue;
-          }
-          this.deckTree.insertFlashcard([...deckPath], cardObj);
+      // Set review settings
+      // {
+      let cardReviewSettings: CardReviewSettings = {
+        interval: 0,
+        ease: 0,
+        delayBeforeReview: 0,
+      };
+      for (const s of scheduling) {
+        if (s != null) {
+          cardReviewSettings = {
+            interval: s.interval,
+            ease: s.ease,
+            delayBeforeReview: now - s.dueUnix,
+          };
         }
+      }
+      for (let sibling of siblings) {
+        sibling.reviewSettings = cardReviewSettings;
+      }
+      // }
 
-        siblings.push(cardObj);
+      for (let sibling of siblings) {
+        sibling.siblings = siblings;
+        cards.push(ObsidianCard.create(sibling).unwrap());
       }
     }
 
-    if (fileChanged) {
-      await this.app.vault.modify(note, fileText);
-    }
 
-    if (scheduledCount > 0) {
-      const flashcardsInNoteAvgEase: number = totalNoteEase / scheduledCount;
-      const flashcardContribution: number = Math.min(
-        1.0,
-        Math.log(scheduledCount + 0.5) / Math.log(64)
-      );
-      return (
-        flashcardsInNoteAvgEase * flashcardContribution +
-        settings.baseEase * (1.0 - flashcardContribution)
-      );
-    }
+    // if (scheduledCount > 0) {
+    //   const flashcardsInNoteAvgEase: number = totalNoteEase / scheduledCount;
+    //   const flashcardContribution: number = Math.min(
+    //     1.0,
+    //     Math.log(scheduledCount + 0.5) / Math.log(64)
+    //   );
+    //   return (
+    //     flashcardsInNoteAvgEase * flashcardContribution +
+    //     settings.baseEase * (1.0 - flashcardContribution)
+    //   );
+    // }
 
-    return 0;
+    return cards;
   }
 
   async loadPluginData (): Promise<void> {
@@ -902,7 +723,7 @@ export default class SRPlugin extends Plugin {
 
   async savePluginData (): Promise<void> {
     await this.saveData(this.data);
-  }
+  };
 
   initView (): void {
     this.registerView(

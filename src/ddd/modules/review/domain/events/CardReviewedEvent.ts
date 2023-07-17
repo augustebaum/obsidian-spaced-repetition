@@ -1,7 +1,7 @@
-import { IDomainEvent } from "src/domain/core/events/IDomainEvent";
-import { UniqueEntityId } from "src/domain/core/UniqueEntityId";
+import { IDomainEvent } from "src/ddd/core/domain/events/IDomainEvent";
+import { UniqueEntityId } from "src/ddd/core/domain/UniqueEntityId";
 
-import { Card } from "src/domain/Card";
+import { Card } from "../Card";
 import { CardReviewRating } from "../CardReviewRating";
 
 export class CardReviewedEvent implements IDomainEvent {

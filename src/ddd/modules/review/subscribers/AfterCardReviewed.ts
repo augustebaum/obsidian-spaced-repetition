@@ -2,14 +2,15 @@ import { DomainEvents } from "src/domain/core/events/DomainEvents";
 import { IHandle } from "src/domain/core/events/IHandle";
 
 import { CardReviewedEvent } from "src/domain/events/CardReviewedEvent";
-import { UpdateCardReviewStats } from "src/domain/useCases/updateCardReviewStats/UpdateCardReviewStats";
+
+import { ReviewCard } from "src/domain/useCases/ReviewCard/ReviewCard";
 
 export class AfterCardReviewed implements IHandle<CardReviewedEvent> {
-  private updateCardReviewStats: UpdateCardReviewStats;
+  private reviewCard: ReviewCard;
 
-  constructor(updateCardReviewStats: UpdateCardReviewStats) {
+  constructor(reviewCard: ReviewCard) {
     this.setupSubscriptions();
-    this.updateCardReviewStats = updateCardReviewStats;
+    this.reviewCard = reviewCard;
   }
 
   setupSubscriptions (): void {
@@ -19,7 +20,7 @@ export class AfterCardReviewed implements IHandle<CardReviewedEvent> {
   private async onCardReviewedEvent (event: CardReviewedEvent): Promise<void> {
     const { card, reviewRating } = event;
 
-    this.updateCardReviewStats.execute({ card, reviewRating })
+    this.reviewCard.execute({ card, reviewRating })
       .then((r) => console.log(r))
       .catch((err) => console.log(err));
   }
